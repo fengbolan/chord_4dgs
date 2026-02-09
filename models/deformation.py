@@ -90,9 +90,14 @@ class Deformation4D(nn.Module):
     def deform_frame(self, gaussian_model: GaussianModel, t: int, use_fine: bool = False):
         """
         Deform frame t (0-indexed, internally 1-indexed for Fenwick).
+        Frame 0 is the static reference — returns original means/quats unchanged.
         Returns: deformed_means [N, 3], deformed_quats [N, 4]
         """
-        t_fenwick = t + 1  # convert to 1-based
+        # Frame 0: static reference, no deformation
+        if t == 0:
+            return gaussian_model.means, gaussian_model.quaternions
+
+        t_fenwick = t  # frame 1 → node 1, frame 2 → node 2, ...
 
         # Coarse deformation
         c_trans, c_rots = self.coarse_fenwick.query(t_fenwick)

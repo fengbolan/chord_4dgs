@@ -21,19 +21,19 @@ class TrainConfig:
 
     # Training
     total_iterations: int = 500
-    batch_size: int = 1
+    batch_size: int = 4
     fine_start_ratio: float = 0.5
     reinit_step: int = 100
 
     # Learning rates (log-linear decay)
-    lr_deformation: float = 0.006
-    lr_deformation_end: float = 0.00006
-    lr_scale: float = 0.006
-    lr_scale_end: float = 0.00006
+    lr_deformation: float = 0.002
+    lr_deformation_end: float = 0.00002
+    lr_scale: float = 0.002
+    lr_scale_end: float = 0.00002
 
     # CFG
-    cfg_scale_start: float = 25.0
-    cfg_scale_end: float = 12.0
+    cfg_scale_start: float = 15.0
+    cfg_scale_end: float = 7.5
 
     # Regularization weights
     temp_weight_start: float = 9.6
@@ -48,11 +48,25 @@ class TrainConfig:
 
     # Output
     output_dir: str = 'outputs'
+    scene_name: str = 'default'
     save_every: int = 100
     log_every: int = 10
 
     # SDS model (set to None to use fake SDS for testing)
     sds_model_name: str = None
 
+    # Scene rotation (degrees, applied after loading PLY)
+    scene_rotate_x: float = 0.0
+    scene_rotate_y: float = 0.0
+    scene_rotate_z: float = 0.0
+
+    # Color levels adjustment (remap [0, white_point] -> [0, 1])
+    color_white_point: float = 1.0
+
     # Device
     device: str = 'cuda:0'
+
+    # Wandb
+    use_wandb: bool = True
+    wandb_project: str = 'chord-4dgs'
+    wandb_run_name: str = None

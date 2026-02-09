@@ -194,6 +194,31 @@ class SDSLossWrapper:
 
         # SDS loss: gradient of this w.r.t. latents = sds_target
         # L = latents * sds_target (dot product, gradient = sds_target)
+        # Note: the scalar loss value can be negative (it's a pseudo-loss for
+        # gradient injection, not a real objective). What matters is the gradient
+        # direction, not the loss value itself.
         loss = (latents.to(torch.bfloat16) * sds_target).sum() / latents.numel()
 
-        return loss, tau_value
+        # Diagnostics (all detached, no extra graph cost)
+        with torch.no_grad():
+            sds_metrics = {
+                # SDS gradient direction magnitude (what gets injected)
+                'sds/target_norm': sds_target.norm().item(),
+                # Latent statistics
+                'sds/latent_norm': latents_bf16.norm().item(),
+                'sds/latent_std': latents_bf16.std().item(),
+                # Noise vs prediction
+                'sds/noise_norm': noise.norm().item(),
+                'sds/vpred_norm': velocity_pred.norm().item(),
+                # CFG effect: how much the text guidance changes the prediction
+                'sds/cfg_delta_norm': (self.guidance_scale * (v_text - v_uncond)).norm().item(),
+                # Cosine similarity between SDS target and latent (alignment)
+                'sds/target_latent_cos': F.cosine_similarity(
+                    sds_target.flatten().unsqueeze(0).float(),
+                    latents_bf16.flatten().unsqueeze(0).float()
+                ).item(),
+                # Per-element mean of SDS target (sign shows push direction)
+                'sds/target_mean': sds_target.mean().item(),
+            }
+
+        return loss, tau_value, sds_metrics
