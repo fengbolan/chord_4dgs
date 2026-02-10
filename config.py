@@ -25,21 +25,28 @@ class TrainConfig:
     fine_start_ratio: float = 0.5
     reinit_step: int = 100
 
-    # Learning rates (log-linear decay)
-    lr_deformation: float = 0.002
-    lr_deformation_end: float = 0.00002
-    lr_scale: float = 0.002
-    lr_scale_end: float = 0.00002
+    # Learning rates (log-linear decay) — CHORD paper values
+    lr_deformation: float = 0.006
+    lr_deformation_end: float = 0.00006
+    lr_scale: float = 0.006
+    lr_scale_end: float = 0.00006
 
-    # CFG
-    cfg_scale_start: float = 15.0
-    cfg_scale_end: float = 7.5
+    # CFG — CHORD paper: 25 → 12
+    cfg_scale_start: float = 25.0
+    cfg_scale_end: float = 12.0
 
     # Regularization weights
     temp_weight_start: float = 9.6
     temp_weight_end: float = 1.6
     spatial_weight_start: float = 3000.0
     spatial_weight_end: float = 300.0
+    num_arap_points: int = 5000
+
+    # Blending weight refresh
+    weight_refresh_every: int = 50
+
+    # Reinit: copy ref frame deformation to later frames
+    reinit_ref_ratio: float = 0.75  # t_ref = int(num_frames * ratio)
 
     # Camera
     fovy_deg: float = 49.1
@@ -55,10 +62,11 @@ class TrainConfig:
     # SDS model (set to None to use fake SDS for testing)
     sds_model_name: str = None
 
-    # Scene rotation (degrees, applied after loading PLY)
+    # Scene transform (applied after loading PLY: rotate then center)
     scene_rotate_x: float = 0.0
     scene_rotate_y: float = 0.0
     scene_rotate_z: float = 0.0
+    center_to_origin: bool = True
 
     # Color levels adjustment (remap [0, white_point] -> [0, 1])
     color_white_point: float = 1.0

@@ -34,14 +34,39 @@ class Deformation4D(nn.Module):
         self.register_buffer('fine_weights', fw.detach(), persistent=False)
         self.register_buffer('fine_indices', fi, persistent=False)
 
-    def refresh_weights(self, means: Tensor, K_neighbors: int = 10):
-        """Re-compute blending weights (call when sigma is updated)."""
-        cw, ci = self.coarse_cp.compute_blending_weights(means, K_neighbors)
-        fw, fi = self.fine_cp.compute_blending_weights(means, K_neighbors)
-        self.coarse_weights = cw.detach()
-        self.coarse_indices = ci
-        self.fine_weights = fw.detach()
-        self.fine_indices = fi
+    def refresh_weights(self, means: Tensor, K_neighbors: int = 10, batch_size: int = 20000):
+        """Re-compute blending weights (call when sigma is updated).
+
+        Uses batching for large gaussian counts to avoid OOM on cdist.
+        """
+        N = means.shape[0]
+        if N <= batch_size:
+            cw, ci = self.coarse_cp.compute_blending_weights(means, K_neighbors)
+            fw, fi = self.fine_cp.compute_blending_weights(means, K_neighbors)
+            self.coarse_weights = cw.detach()
+            self.coarse_indices = ci
+            self.fine_weights = fw.detach()
+            self.fine_indices = fi
+        else:
+            cw_l, ci_l, fw_l, fi_l = [], [], [], []
+            for start in range(0, N, batch_size):
+                batch = means[start:start + batch_size]
+                cw, ci = self.coarse_cp.compute_blending_weights(batch, K_neighbors)
+                fw, fi = self.fine_cp.compute_blending_weights(batch, K_neighbors)
+                cw_l.append(cw.detach())
+                ci_l.append(ci)
+                fw_l.append(fw.detach())
+                fi_l.append(fi)
+            self.coarse_weights = torch.cat(cw_l, dim=0)
+            self.coarse_indices = torch.cat(ci_l, dim=0)
+            self.fine_weights = torch.cat(fw_l, dim=0)
+            self.fine_indices = torch.cat(fi_l, dim=0)
+
+    def reinit_later_frames(self, t_ref: int):
+        """Copy frame t_ref's deformation to all later frames (CHORD-style reinit)."""
+        with torch.no_grad():
+            self.coarse_fenwick.reinit_later_frames(t_ref)
+            self.fine_fenwick.reinit_later_frames(t_ref)
 
     def _lbs_deform(self, means: Tensor, quaternions: Tensor,
                     weights: Tensor, indices: Tensor,

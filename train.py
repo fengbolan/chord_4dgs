@@ -22,7 +22,7 @@ from scene_configs import get_scene_preset
 from models.gaussian_model import GaussianModel
 from models.deformation import Deformation4D
 from core.renderer import render_gaussians, render_video
-from core.regularization import temporal_regularization
+from core.regularization import temporal_regularization, arap_regularization
 from utils.camera_utils import orbit_camera, random_camera, get_intrinsics
 
 
@@ -177,6 +177,9 @@ def train(config: TrainConfig):
     gs = GaussianModel()
     gs.load_ply(config.ply_path)
     gs.apply_rotation(config.scene_rotate_x, config.scene_rotate_y, config.scene_rotate_z)
+    if getattr(config, 'center_to_origin', True):
+        offset = gs.center_to_origin()
+        print(f"[{_ts()}] Centered to origin (offset: {offset[0]:.4f}, {offset[1]:.4f}, {offset[2]:.4f})")
     gs.to(device)
     print(f"[{_ts()}] Loaded {gs.num_gaussians} gaussians")
     if config.scene_rotate_x or config.scene_rotate_y or config.scene_rotate_z:
@@ -218,27 +221,65 @@ def train(config: TrainConfig):
     scene_center = gs.means.mean(dim=0).detach().cpu()
     fx, fy, cx, cy = get_intrinsics(config.fovy_deg, config.render_width, config.render_height)
     K = (fx, fy, cx, cy)
-    vis_viewmat = orbit_camera(15, 45, config.camera_radius, target=scene_center).to(device)
+    vis_views = [
+        ('ele15_azi045', 15, 45),
+        ('ele15_azi180', 15, 180),
+        ('ele15_azi270', 15, 270),
+    ]
+    vis_viewmats = {
+        name: orbit_camera(ele, azi, config.camera_radius, target=scene_center).to(device)
+        for name, ele, azi in vis_views
+    }
 
     # Training loop
     print(f"\n[{_ts()}] Starting training for {config.total_iterations} iterations...")
     print(f"[{_ts()}] Text prompt: {config.text_prompt}")
     print(f"[{_ts()}] Render: {config.render_width}x{config.render_height}, {config.num_frames} frames")
 
+    # Create optimizer ONCE (persist Adam momentum across steps)
+    use_fine = False
+    param_groups = deform.get_optimizable_params(use_fine)
+    for pg in param_groups:
+        if 'sigma' in pg['name']:
+            pg['lr'] = config.lr_scale
+        elif 'rots' in pg['name']:
+            pg['lr'] = config.lr_deformation * 0.5
+        else:
+            pg['lr'] = config.lr_deformation
+    optimizer = torch.optim.Adam(param_groups)
+
+    # Pre-sample ARAP point indices (re-sampled periodically)
+    num_arap_pts = getattr(config, 'num_arap_points', 5000)
+    arap_idx = torch.randint(0, gs.num_gaussians, (num_arap_pts,), device=device)
+    arap_orig_pts = gs.means[arap_idx].detach()
+
     t_start = time.time()
 
     for step in range(config.total_iterations):
         step_t0 = time.time()
-        use_fine = step >= config.total_iterations * config.fine_start_ratio
+        new_use_fine = step >= config.total_iterations * config.fine_start_ratio
 
-        # LR decay
+        # Rebuild optimizer when fine stage starts (preserves coarse momentum impossible
+        # across param group change, but at least we don't recreate every step)
+        if new_use_fine and not use_fine:
+            use_fine = True
+            param_groups = deform.get_optimizable_params(use_fine)
+            for pg in param_groups:
+                if 'sigma' in pg['name']:
+                    pg['lr'] = config.lr_scale
+                elif 'rots' in pg['name']:
+                    pg['lr'] = config.lr_deformation * 0.5
+                else:
+                    pg['lr'] = config.lr_deformation
+            optimizer = torch.optim.Adam(param_groups)
+            print(f"[{_ts()}] Step {step}: Fine stage started, optimizer rebuilt with fine params")
+
+        # LR decay (update in-place on existing optimizer)
         lr_def = log_linear_decay(config.lr_deformation, config.lr_deformation_end,
                                   step, config.total_iterations)
         lr_sc = log_linear_decay(config.lr_scale, config.lr_scale_end,
                                  step, config.total_iterations)
-
-        param_groups = deform.get_optimizable_params(use_fine)
-        for pg in param_groups:
+        for pg in optimizer.param_groups:
             if 'sigma' in pg['name']:
                 pg['lr'] = lr_sc
             elif 'rots' in pg['name']:
@@ -246,7 +287,6 @@ def train(config: TrainConfig):
             else:
                 pg['lr'] = lr_def
 
-        optimizer = torch.optim.Adam(param_groups)
         optimizer.zero_grad()
 
         # Multi-view SDS: each view gets its own deform→render→SDS→backward
@@ -256,8 +296,11 @@ def train(config: TrainConfig):
         cfg_val = 0.0
         sds_metrics = {}
         L_temp = torch.tensor(0.0, device=device)
+        L_arap = torch.tensor(0.0, device=device)
         temp_w = linear_decay(config.temp_weight_start, config.temp_weight_end,
                               step, config.total_iterations)
+        spatial_w = linear_decay(config.spatial_weight_start, config.spatial_weight_end,
+                                 step, config.total_iterations)
 
         for view_i in range(config.batch_size):
             # Fresh deform per view (independent graph, frees after backward)
@@ -266,7 +309,10 @@ def train(config: TrainConfig):
             # Regularization on first view only
             if view_i == 0:
                 L_temp = temporal_regularization(all_means)
-                (temp_w * L_temp).backward(retain_graph=True)
+                L_arap = arap_regularization(
+                    arap_orig_pts, all_means[:, arap_idx, :])
+                reg_loss = temp_w * L_temp + spatial_w * L_arap
+                reg_loss.backward(retain_graph=True)
 
             viewmat = random_camera(
                 elevation_range=config.elevation_range,
@@ -310,24 +356,38 @@ def train(config: TrainConfig):
 
         step_time = time.time() - step_t0
 
+        # Refresh blending weights periodically (sigma params change via optimizer)
+        refresh_every = getattr(config, 'weight_refresh_every', 50)
+        if refresh_every > 0 and (step + 1) % refresh_every == 0:
+            with torch.no_grad():
+                deform.refresh_weights(gs.means, config.K_neighbors)
+            # Re-sample ARAP indices too
+            arap_idx = torch.randint(0, gs.num_gaussians, (num_arap_pts,), device=device)
+            arap_orig_pts = gs.means[arap_idx].detach()
+
         # Compute deformation magnitude for diagnostics (use last view's all_means)
         with torch.no_grad():
             deform_mag = (all_means - gs.means.unsqueeze(0)).norm(dim=-1).mean().item()
 
-        # Reinit: reset late frames at reinit_step
+        # Reinit: copy ref frame deformation to later frames (CHORD-style)
         if step == config.reinit_step:
-            print(f"[{_ts()}] Step {step}: Reinitializing late frame deformations")
+            t_ref = int(config.num_frames * getattr(config, 'reinit_ref_ratio', 0.75))
+            t_ref = max(1, min(t_ref, config.num_frames - 1))
+            print(f"[{_ts()}] Step {step}: Reinit — copying frame {t_ref} deformation to frames {t_ref+1}..{config.num_frames-1}")
+            deform.reinit_later_frames(t_ref)
 
         # Logging
         if step % config.log_every == 0:
             metrics = {
                 'L_temp': L_temp.item(),
+                'L_arap': L_arap.item(),
                 'sds_loss': sds_val,
                 'tau': tau_val,
                 'cfg_scale': cfg_val,
                 'lr_def': lr_def,
                 'lr_scale': lr_sc,
                 'temp_weight': temp_w,
+                'spatial_weight': spatial_w,
                 'deform_mag': deform_mag,
                 'fine': int(use_fine),
                 'step_time': step_time,
@@ -339,6 +399,7 @@ def train(config: TrainConfig):
             eta = elapsed / (step + 1) * (config.total_iterations - step - 1)
             print(f"[{_ts()}] Step {step}/{config.total_iterations} | "
                   f"L_temp: {L_temp.item():.6f} | "
+                  f"L_arap: {L_arap.item():.6f} | "
                   f"SDS: {sds_val:.4f} | "
                   f"grad_norm: {sds_metrics.get('sds/video_grad_norm', 0.0):.4f} | "
                   f"tau: {tau_val:.3f} | "
@@ -351,22 +412,24 @@ def train(config: TrainConfig):
         if step % config.save_every == 0 or step == config.total_iterations - 1:
             with torch.no_grad():
                 vis_means, vis_quats = deform.deform_all_frames(gs, use_fine=use_fine)
-                vis_video = render_video(
-                    vis_means, vis_quats,
-                    activated_scales, sh_coeffs, activated_opacities,
-                    vis_viewmat, K, config.render_width, config.render_height,
-                    config.num_frames, sh_degree=sh_degree
-                )
-                # Color levels adjustment
-                if config.color_white_point != 1.0:
-                    vis_video = (vis_video / config.color_white_point).clamp(0, 1)
-                gif_path = os.path.join(config.output_dir, f'step_{step:05d}.gif')
-                save_gif(vis_video, gif_path)
-                print(f"[{_ts()}]   Saved {gif_path}")
-                # Log first frame to tensorboard
-                logger.log_image(step, 'render/frame0', gif_path)
-                # Log video to wandb
-                logger.log_video(step, 'render/video', gif_path)
+                first_gif_path = None
+                for vname, vmat in vis_viewmats.items():
+                    vis_video = render_video(
+                        vis_means, vis_quats,
+                        activated_scales, sh_coeffs, activated_opacities,
+                        vmat, K, config.render_width, config.render_height,
+                        config.num_frames, sh_degree=sh_degree
+                    )
+                    if config.color_white_point != 1.0:
+                        vis_video = (vis_video / config.color_white_point).clamp(0, 1)
+                    gif_path = os.path.join(config.output_dir, f'step_{step:05d}_{vname}.gif')
+                    save_gif(vis_video, gif_path)
+                    if first_gif_path is None:
+                        first_gif_path = gif_path
+                print(f"[{_ts()}]   Saved {len(vis_viewmats)} views for step {step}")
+                # Log first view to tensorboard/wandb
+                logger.log_image(step, 'render/frame0', first_gif_path)
+                logger.log_video(step, 'render/video', first_gif_path)
                 # Save checkpoint
                 ckpt_path = os.path.join(config.output_dir, f'checkpoint_step_{step:05d}.pt')
                 torch.save({

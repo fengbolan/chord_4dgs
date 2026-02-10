@@ -98,6 +98,12 @@ class GaussianModel:
         """Apply exp to get positive scales."""
         return torch.exp(self._scales)  # [N, 3]
 
+    def center_to_origin(self):
+        """Translate all means so the centroid is at the origin."""
+        center = self._means.mean(dim=0)
+        self._means = self._means - center
+        return center  # return offset for reference
+
     def apply_rotation(self, rot_x_deg: float = 0, rot_y_deg: float = 0, rot_z_deg: float = 0):
         """Apply extrinsic XYZ rotation to the scene (means + quaternions).
         Rotates around the scene center. Angles in degrees."""

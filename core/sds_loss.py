@@ -105,12 +105,29 @@ class SDSLossWrapper:
         return embeds
 
     def get_tau_for_iteration(self, iteration, total_iterations=None):
-        """Annealing: tau decreases from max to min."""
+        """CHORD-style tau scheduling: random sample from a decreasing window.
+
+        At each iteration, define a sampling window [tau_low, tau_high] that
+        slides from high noise to low noise over training:
+          - tau_high(t) = max_tau → mid_tau  (linearly)
+          - tau_low(t)  = mid_tau → min_tau  (linearly)
+        Then randomly sample tau from this window with linear weighting
+        (higher tau slightly more likely, matching W-RFSDS).
+        """
         if total_iterations is None:
             total_iterations = self.total_iterations
-        target_cdf = 1.0 - iteration / (total_iterations + 1)
-        target_cdf = np.clip(target_cdf, 0.001, 0.999)
-        return float(np.sqrt(target_cdf * (self.max_tau**2 - self.min_tau**2) + self.min_tau**2))
+        ratio = iteration / max(total_iterations - 1, 1)  # 0 → 1
+
+        mid_tau = 0.5 * (self.max_tau + self.min_tau)
+        tau_high = self.max_tau - ratio * (self.max_tau - mid_tau)
+        tau_low = mid_tau - ratio * (mid_tau - self.min_tau)
+
+        # Inverse CDF sampling with linear weight w(τ)=τ within [tau_low, tau_high]
+        # CDF: h(τ) = (τ² - τ_low²) / (τ_high² - τ_low²)
+        # Inverse: τ = sqrt(u * (τ_high² - τ_low²) + τ_low²)
+        u = np.random.uniform(0.0, 1.0)
+        tau = float(np.sqrt(u * (tau_high**2 - tau_low**2) + tau_low**2))
+        return tau
 
     def compute_sds_loss(self, video: Tensor, text_prompt: str,
                          negative_prompt: str = "", iteration: int = None):

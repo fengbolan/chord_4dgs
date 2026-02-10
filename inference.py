@@ -64,6 +64,8 @@ def load_model(checkpoint_path, device='cuda:0'):
         getattr(config, 'scene_rotate_y', 0),
         getattr(config, 'scene_rotate_z', 0),
     )
+    if getattr(config, 'center_to_origin', True):
+        gs.center_to_origin()
     gs.to(device)
 
     # Initialize deformation with same architecture
@@ -74,6 +76,8 @@ def load_model(checkpoint_path, device='cuda:0'):
         num_frames=config.num_frames,
     ).to(device)
     deform.load_state_dict(ckpt['deformation_state_dict'])
+    # Refresh blending weights to match the loaded sigma parameters
+    deform.refresh_weights(gs.means.to(device), config.K_neighbors)
     deform.eval()
 
     return gs, deform, config
