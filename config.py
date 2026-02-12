@@ -7,9 +7,9 @@ class TrainConfig:
     ply_path: str = '../data/1.ply'
     text_prompt: str = "A object is moving"
 
-    # Resolution
-    render_width: int = 512
-    render_height: int = 288
+    # Resolution (832x464 matches Wan 2.2 native, no resize needed)
+    render_width: int = 832
+    render_height: int = 464
 
     # Time
     num_frames: int = 16
@@ -51,7 +51,9 @@ class TrainConfig:
     # Camera
     fovy_deg: float = 49.1
     camera_radius: float = 3.0
-    elevation_range: tuple = (-30, 30)
+    elevation_range: tuple = (-15, 15)
+    camera_radius_jitter: float = 0.1  # ±10% radius variation
+    camera_follow: bool = False  # Track per-frame object center (for walking animals etc.)
 
     # Output
     output_dir: str = 'outputs'

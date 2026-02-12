@@ -211,7 +211,7 @@ def train(config: TrainConfig):
             guidance_scale=config.cfg_scale_start,
             min_tau=0.02, max_tau=0.98,
             total_iterations=config.total_iterations,
-            target_h=480, target_w=832,
+            target_h=config.render_height, target_w=config.render_width,
         )
         sds.load_model()
     else:
@@ -314,12 +314,26 @@ def train(config: TrainConfig):
                 reg_loss = temp_w * L_temp + spatial_w * L_arap
                 reg_loss.backward(retain_graph=True)
 
-            viewmat = random_camera(
-                elevation_range=config.elevation_range,
-                azimuth_range=(0, 360),
-                radius_range=(config.camera_radius * 0.8, config.camera_radius * 1.2),
-                target=scene_center
-            ).to(device)
+            jitter = getattr(config, 'camera_radius_jitter', 0.1)
+            if getattr(config, 'camera_follow', False):
+                # Camera follow: per-frame viewmat tracking object center
+                frame_centers = all_means.detach().mean(dim=1).cpu()  # [T, 3]
+                ele = np.random.uniform(*config.elevation_range)
+                azi = np.random.uniform(0, 360)
+                rad = np.random.uniform(
+                    config.camera_radius * (1 - jitter),
+                    config.camera_radius * (1 + jitter))
+                viewmat = torch.stack([
+                    orbit_camera(ele, azi, rad, target=frame_centers[t])
+                    for t in range(config.num_frames)
+                ]).to(device)  # [T, 4, 4]
+            else:
+                viewmat = random_camera(
+                    elevation_range=config.elevation_range,
+                    azimuth_range=(0, 360),
+                    radius_range=(config.camera_radius * (1 - jitter), config.camera_radius * (1 + jitter)),
+                    target=scene_center
+                ).to(device)
 
             video = render_video(
                 all_means, all_quats,
@@ -356,14 +370,14 @@ def train(config: TrainConfig):
 
         step_time = time.time() - step_t0
 
-        # Refresh blending weights periodically (sigma params change via optimizer)
+        # Re-sample ARAP points periodically for diversity
         refresh_every = getattr(config, 'weight_refresh_every', 50)
         if refresh_every > 0 and (step + 1) % refresh_every == 0:
-            with torch.no_grad():
-                deform.refresh_weights(gs.means, config.K_neighbors)
-            # Re-sample ARAP indices too
             arap_idx = torch.randint(0, gs.num_gaussians, (num_arap_pts,), device=device)
             arap_orig_pts = gs.means[arap_idx].detach()
+            # Also update cached weights for deform_frame (used in visualization)
+            with torch.no_grad():
+                deform.refresh_weights(gs.means, config.K_neighbors)
 
         # Compute deformation magnitude for diagnostics (use last view's all_means)
         with torch.no_grad():
@@ -412,8 +426,22 @@ def train(config: TrainConfig):
         if step % config.save_every == 0 or step == config.total_iterations - 1:
             with torch.no_grad():
                 vis_means, vis_quats = deform.deform_all_frames(gs, use_fine=use_fine)
+                # Build per-frame viewmats for camera follow mode
+                if getattr(config, 'camera_follow', False):
+                    vis_frame_centers = vis_means.mean(dim=1).cpu()  # [T, 3]
+                    vis_viewmats_follow = {}
+                    for vname, ele, azi in vis_views:
+                        vms = torch.stack([
+                            orbit_camera(ele, azi, config.camera_radius,
+                                         target=vis_frame_centers[t])
+                            for t in range(config.num_frames)
+                        ]).to(device)  # [T, 4, 4]
+                        vis_viewmats_follow[vname] = vms
+                    active_vis_viewmats = vis_viewmats_follow
+                else:
+                    active_vis_viewmats = vis_viewmats
                 first_gif_path = None
-                for vname, vmat in vis_viewmats.items():
+                for vname, vmat in active_vis_viewmats.items():
                     vis_video = render_video(
                         vis_means, vis_quats,
                         activated_scales, sh_coeffs, activated_opacities,
@@ -426,7 +454,7 @@ def train(config: TrainConfig):
                     save_gif(vis_video, gif_path)
                     if first_gif_path is None:
                         first_gif_path = gif_path
-                print(f"[{_ts()}]   Saved {len(vis_viewmats)} views for step {step}")
+                print(f"[{_ts()}]   Saved {len(active_vis_viewmats)} views for step {step}")
                 # Log first view to tensorboard/wandb
                 logger.log_image(step, 'render/frame0', first_gif_path)
                 logger.log_video(step, 'render/video', first_gif_path)
@@ -476,6 +504,12 @@ if __name__ == '__main__':
     parser.add_argument('--device', type=str, default=None)
     parser.add_argument('--sds_model_name', type=str, default=None)
     parser.add_argument('--camera_radius', type=float, default=None)
+    parser.add_argument('--camera_follow', action='store_true', default=None,
+                        help='Camera follows object center per frame (for walking animals)')
+    parser.add_argument('--temp_weight_start', type=float, default=None)
+    parser.add_argument('--temp_weight_end', type=float, default=None)
+    parser.add_argument('--spatial_weight_start', type=float, default=None)
+    parser.add_argument('--spatial_weight_end', type=float, default=None)
     parser.add_argument('--fovy_deg', type=float, default=None)
     parser.add_argument('--color_white_point', type=float, default=None)
     parser.add_argument('--scene_rotate_x', type=float, default=None)

@@ -114,9 +114,9 @@ class Deformation4D(nn.Module):
 
     def deform_frame(self, gaussian_model: GaussianModel, t: int, use_fine: bool = False):
         """
-        Deform frame t (0-indexed, internally 1-indexed for Fenwick).
-        Frame 0 is the static reference — returns original means/quats unchanged.
-        Returns: deformed_means [N, 3], deformed_quats [N, 4]
+        Deform frame t using *cached* (detached) weights.
+        Used for inference / single-frame rendering (e.g. orbit mode).
+        For training, use deform_all_frames() which computes live weights.
         """
         # Frame 0: static reference, no deformation
         if t == 0:
@@ -143,14 +143,49 @@ class Deformation4D(nn.Module):
 
         return dm, dq
 
-    def deform_all_frames(self, gaussian_model: GaussianModel, use_fine: bool = False):
-        """Deform all frames. Returns [T, N, 3] and [T, N, 4]."""
+    def deform_all_frames(self, gaussian_model: GaussianModel, use_fine: bool = False,
+                          K_neighbors: int = 10):
+        """Deform all frames with live (differentiable) blending weights.
+
+        Unlike deform_frame() which uses cached detached weights, this method
+        computes fresh weights from log_sigma each call, enabling gradient flow
+        to the sigma parameters during training.
+
+        Returns [T, N, 3] and [T, N, 4].
+        """
+        means = gaussian_model.means
+        quats = gaussian_model.quaternions
+
+        # Compute fresh blending weights (differentiable w.r.t. log_sigma)
+        cw, ci = self.coarse_cp.compute_blending_weights(means, K_neighbors)
+        if use_fine:
+            fw, fi = self.fine_cp.compute_blending_weights(means, K_neighbors)
+
         all_means = []
         all_quats = []
         for t in range(self.num_frames):
-            dm, dq = self.deform_frame(gaussian_model, t, use_fine)
+            if t == 0:
+                all_means.append(means)
+                all_quats.append(quats)
+                continue
+
+            t_fenwick = t
+            c_trans, c_rots = self.coarse_fenwick.query(t_fenwick)
+            dm, dq = self._lbs_deform(
+                means, quats, cw, ci,
+                c_trans, c_rots, self.coarse_cp.positions
+            )
+
+            if use_fine:
+                f_trans, f_rots = self.fine_fenwick.query(t_fenwick)
+                dm, dq = self._lbs_deform(
+                    dm, dq, fw, fi,
+                    f_trans, f_rots, self.fine_cp.positions
+                )
+
             all_means.append(dm)
             all_quats.append(dq)
+
         return torch.stack(all_means), torch.stack(all_quats)
 
     def get_optimizable_params(self, use_fine: bool = False):

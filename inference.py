@@ -85,11 +85,8 @@ def load_model(checkpoint_path, device='cuda:0'):
 
 @torch.no_grad()
 def render_from_view(gs, deform, config, elevation, azimuth, radius,
-                     width, height, device='cuda:0'):
+                     width, height, device='cuda:0', camera_follow=False):
     """Render 4DGS video from a specific viewpoint."""
-    scene_center = gs.means.mean(dim=0).cpu()
-    viewmat = orbit_camera(elevation, azimuth, radius, target=scene_center).to(device)
-
     K = get_intrinsics(config.fovy_deg, width, height)
 
     activated_opacities = gs.get_activated_opacities()
@@ -98,6 +95,17 @@ def render_from_view(gs, deform, config, elevation, azimuth, radius,
     sh_degree = int(math.sqrt(sh_coeffs.shape[1])) - 1
 
     all_means, all_quats = deform.deform_all_frames(gs, use_fine=True)
+
+    if camera_follow:
+        # Per-frame viewmat tracking object center
+        frame_centers = all_means.mean(dim=1).cpu()  # [T, 3]
+        viewmat = torch.stack([
+            orbit_camera(elevation, azimuth, radius, target=frame_centers[t])
+            for t in range(config.num_frames)
+        ]).to(device)  # [T, 4, 4]
+    else:
+        scene_center = gs.means.mean(dim=0).cpu()
+        viewmat = orbit_camera(elevation, azimuth, radius, target=scene_center).to(device)
 
     video = render_video(
         all_means, all_quats,
@@ -114,11 +122,12 @@ def render_from_view(gs, deform, config, elevation, azimuth, radius,
 @torch.no_grad()
 def mode_single(gs, deform, config, args):
     """Render a single viewpoint GIF."""
-    print(f"Rendering: elevation={args.elevation}, azimuth={args.azimuth}, radius={args.radius}")
+    follow = getattr(args, 'camera_follow', False) or getattr(config, 'camera_follow', False)
+    print(f"Rendering: elevation={args.elevation}, azimuth={args.azimuth}, radius={args.radius}, follow={follow}")
     video = render_from_view(
         gs, deform, config,
         args.elevation, args.azimuth, args.radius,
-        args.width, args.height, args.device
+        args.width, args.height, args.device, camera_follow=follow
     )
     out_path = os.path.join(args.output, 'render.gif')
     save_gif(video, out_path, duration=args.frame_duration)
@@ -128,16 +137,17 @@ def mode_single(gs, deform, config, args):
 @torch.no_grad()
 def mode_multiview(gs, deform, config, args):
     """Render from a grid of viewpoints."""
+    follow = getattr(args, 'camera_follow', False) or getattr(config, 'camera_follow', False)
     elevations = [float(e) for e in args.elevations.split(',')]
     azimuths = np.linspace(0, 360, args.num_azimuths, endpoint=False)
 
     for ele in elevations:
         for azi in azimuths:
-            print(f"Rendering: ele={ele:.0f}, azi={azi:.0f}")
+            print(f"Rendering: ele={ele:.0f}, azi={azi:.0f}, follow={follow}")
             video = render_from_view(
                 gs, deform, config,
                 ele, azi, args.radius,
-                args.width, args.height, args.device
+                args.width, args.height, args.device, camera_follow=follow
             )
             name = f'ele{ele:.0f}_azi{azi:.0f}.gif'
             out_path = os.path.join(args.output, name)
@@ -152,6 +162,7 @@ def mode_orbit(gs, deform, config, args):
     Output: a single video where each output frame = one (time, azimuth) pair.
     The camera sweeps through `num_orbits` full rotations over the animation.
     """
+    follow = getattr(args, 'camera_follow', False) or getattr(config, 'camera_follow', False)
     scene_center = gs.means.mean(dim=0).cpu()
     K = get_intrinsics(config.fovy_deg, args.width, args.height)
 
@@ -161,6 +172,10 @@ def mode_orbit(gs, deform, config, args):
     sh_degree = int(math.sqrt(sh_coeffs.shape[1])) - 1
 
     all_means, all_quats = deform.deform_all_frames(gs, use_fine=True)
+
+    # Pre-compute per-frame centers for camera follow
+    if follow:
+        frame_centers = all_means.mean(dim=1).cpu()  # [T, 3]
 
     T = config.num_frames
     total_out_frames = args.orbit_frames
@@ -175,7 +190,8 @@ def mode_orbit(gs, deform, config, args):
         azi = (i / total_out_frames) * 360.0 * args.num_orbits
         ele = args.elevation
 
-        viewmat = orbit_camera(ele, azi, args.radius, target=scene_center).to(args.device)
+        target = frame_centers[t] if follow else scene_center
+        viewmat = orbit_camera(ele, azi, args.radius, target=target).to(args.device)
 
         from core.renderer import render_gaussians
         img, _ = render_gaussians(
@@ -201,7 +217,7 @@ def mode_orbit(gs, deform, config, args):
         video = render_from_view(
             gs, deform, config,
             args.elevation, azi, args.radius,
-            args.width, args.height, args.device
+            args.width, args.height, args.device, camera_follow=follow
         )
         name = f'view_azi{azi:03d}.gif'
         save_gif(video, os.path.join(args.output, name), duration=args.frame_duration)
@@ -225,6 +241,8 @@ if __name__ == '__main__':
     parser.add_argument('--elevation', type=float, default=15.0)
     parser.add_argument('--azimuth', type=float, default=45.0)
     parser.add_argument('--radius', type=float, default=3.0)
+    parser.add_argument('--camera_follow', action='store_true',
+                        help='Camera follows object center per frame (auto-enabled if set in checkpoint config)')
     # Multiview options
     parser.add_argument('--elevations', type=str, default='-15,0,15,30',
                         help='Comma-separated elevation angles')

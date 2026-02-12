@@ -71,13 +71,16 @@ def render_video(all_means: Tensor, all_quats: Tensor,
     Render video sequence.
     all_means: [T, N, 3], all_quats: [T, N, 4]
     Rest are static per-Gaussian properties.
+    viewmat: [4, 4] (same view for all frames) or [T, 4, 4] (per-frame camera follow)
     Returns: video [T, H, W, 3]
     """
+    per_frame_view = viewmat.dim() == 3
     frames = []
     for t in range(num_frames):
+        vm = viewmat[t] if per_frame_view else viewmat
         img, _ = render_gaussians(
             all_means[t], all_quats[t], scales, colors, opacities,
-            viewmat, K, width, height, bg_color, sh_degree
+            vm, K, width, height, bg_color, sh_degree
         )
         frames.append(img)
     return torch.stack(frames)

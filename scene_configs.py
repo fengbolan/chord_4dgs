@@ -34,20 +34,38 @@ SCENE_PRESETS = {
         "scene_rotate_z": 0.0,
         # Very dark scene (RGB max ~0.27), remap [0, 0.2] -> [0, 1]
         "color_white_point": 0.2,
+        # Camera follows the cat as it walks forward
+        "camera_follow": True,
+    },
+    "can": {
+        "ply_path": "../sds_data/packofcan/ply/can_1.ply",
+        "text_prompt": "A soda can slowly denting and caving inward under pressure",
+        "scene_name": "can",
+        "camera_radius": 0.4,
+        # Can height along Z in PLY, +90° X to stand upright (-Y is up)
+        "scene_rotate_x": 90.0,
+        "scene_rotate_y": 0.0,
+        "scene_rotate_z": 0.0,
+        # Very dark scene (RGB max ~0.28), same fix as cat
+        "color_white_point": 0.2,
+        "elevation_range": (-10, 25),
     },
     "dog": {
         "ply_path": "../data/dog.ply",
         "text_prompt": "A dog is walking",
         "scene_name": "dog",
-        "camera_radius": 1.5,
-        "num_coarse_cp": 50,
-        "num_fine_cp": 500,
+        "camera_radius": 2.5,
+        "num_coarse_cp": 100,
+        "num_fine_cp": 1000,
+        "elevation_range": (-15, 15),
         # Dog body along Y, legs in -Z; -90° X to stand upright
         "scene_rotate_x": -90.0,
         "scene_rotate_y": 0.0,
         "scene_rotate_z": 0.0,
         # Very dark scene (RGB max ~0.28), same fix as cat
         "color_white_point": 0.2,
+        # Camera follows the dog as it walks forward
+        "camera_follow": True,
     },
 }
 
