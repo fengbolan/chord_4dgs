@@ -1,4 +1,6 @@
 #!/bin/bash
+cd "$(dirname "$0")/.."
+
 CUDA_VISIBLE_DEVICES=1 /mnt/workspace/fblan/miniforge3/envs/gsplat/bin/python train.py \
   --ply_path /mnt/workspace/fblan/trajectory-generation/4dgs_generation/sds_data/characters/ply/tony.ply \
   --text_prompt "A person slowly brings both arms together in front of their chest, wrapping them inward as if giving a warm hug" \

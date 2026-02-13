@@ -11,9 +11,9 @@ build/
 outputs/
 outputs_*/
 
-# Test artifacts
-test_*.png
-test_*.gif
+# Test / debug artifacts
+debug/*.png
+debug/*.gif
 
 # Checkpoints
 *.pt

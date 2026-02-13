@@ -17,7 +17,7 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from PIL import Image
 import io
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from inference import load_model
 
 # ── Config ──────────────────────────────────────────────────────────

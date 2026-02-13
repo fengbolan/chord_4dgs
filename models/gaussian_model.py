@@ -98,6 +98,11 @@ class GaussianModel:
         """Apply exp to get positive scales."""
         return torch.exp(self._scales)  # [N, 3]
 
+    def apply_offset(self, offset_xyz):
+        """Translate all means by (dx, dy, dz)."""
+        offset = torch.tensor(offset_xyz, dtype=torch.float32, device=self._means.device)
+        self._means = self._means + offset
+
     def center_to_origin(self):
         """Translate all means so the centroid is at the origin."""
         center = self._means.mean(dim=0)

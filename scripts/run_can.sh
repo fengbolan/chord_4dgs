@@ -1,4 +1,6 @@
 #!/bin/bash
+cd "$(dirname "$0")/.."
+
 CUDA_VISIBLE_DEVICES=0 /mnt/workspace/fblan/miniforge3/envs/gsplat/bin/python train.py \
   --scene can \
   --sds_model_name Wan-AI/Wan2.2-T2V-A14B-Diffusers \

@@ -1,4 +1,23 @@
 from dataclasses import dataclass, field
+from typing import List, Optional
+
+
+@dataclass
+class ObjectConfig:
+    """Per-object configuration for multi-object scenes."""
+    name: str = "object"
+    ply_path: str = ""
+    scene_rotate_x: float = 0.0
+    scene_rotate_y: float = 0.0
+    scene_rotate_z: float = 0.0
+    center_to_origin: bool = True
+    position_offset: tuple = (0.0, 0.0, 0.0)
+    color_white_point: float = 1.0
+    num_coarse_cp: int = None   # None → use global default
+    num_fine_cp: int = None
+    temp_weight_mult: float = 1.0      # multiplier on global temporal weight
+    spatial_weight_mult: float = 1.0   # multiplier on global spatial weight
+    displacement_axis_weights: tuple = (0.0, 0.0, 0.0)  # per-axis displacement anchor (X, Y, Z)
 
 
 @dataclass
@@ -38,6 +57,8 @@ class TrainConfig:
     # Regularization weights
     temp_weight_start: float = 9.6
     temp_weight_end: float = 1.6
+    accel_weight_start: float = 0.5
+    accel_weight_end: float = 0.5
     spatial_weight_start: float = 3000.0
     spatial_weight_end: float = 300.0
     num_arap_points: int = 5000
@@ -75,6 +96,21 @@ class TrainConfig:
 
     # Device
     device: str = 'cuda:0'
+
+    # Multi-object
+    objects: list = field(default_factory=list)  # List[dict] → converted to ObjectConfig at runtime
+
+    # Displacement regularization (anchors objects to original position)
+    displacement_weight_start: float = 0.0   # default off for backwards compat
+    displacement_weight_end: float = 0.0
+    displacement_axis_weights: tuple = (0.0, 0.0, 0.0)  # per-axis weights (X, Y, Z)
+
+    # Contact loss (multi-object only)
+    contact_weight_start: float = 100.0
+    contact_weight_end: float = 10.0
+    contact_target_distance: float = 0.05
+    impact_weight: float = 0.0  # impact_deformation_loss weight (0 = disabled)
+    impact_influence_radius: float = 0.3
 
     # Wandb
     use_wandb: bool = True

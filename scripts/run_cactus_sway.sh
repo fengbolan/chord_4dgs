@@ -4,7 +4,7 @@
 
 set -e
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 # Step 1: Install dependencies if needed
 echo "=== Checking dependencies ==="

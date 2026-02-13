@@ -50,13 +50,42 @@ def save_orbit_video(frames_list, path, fps=24):
 
 
 def load_model(checkpoint_path, device='cuda:0'):
-    """Load trained deformation model from checkpoint."""
+    """Load trained deformation model from checkpoint.
+
+    Returns:
+        For single-object: (gs, deform, config)
+        For multi-object:  (scene, None, config) where scene is MultiObjectScene
+    """
     ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     config_dict = ckpt['config']
     config = TrainConfig(**{k: v for k, v in config_dict.items()
                             if hasattr(TrainConfig, k)})
 
-    # Load 3DGS (apply same rotation as training)
+    is_multi_object = ckpt.get('multi_object', False)
+
+    if is_multi_object:
+        from models.multi_object_scene import MultiObjectScene
+        from config import ObjectConfig
+        obj_configs = []
+        for obj_dict in config.objects:
+            d = dict(obj_dict)
+            if 'position_offset' in d and isinstance(d['position_offset'], list):
+                d['position_offset'] = tuple(d['position_offset'])
+            obj_configs.append(ObjectConfig(**d))
+        scene = MultiObjectScene(
+            obj_configs,
+            num_frames=config.num_frames,
+            global_num_coarse=config.num_coarse_cp,
+            global_num_fine=config.num_fine_cp,
+            K_neighbors=config.K_neighbors,
+            device=device,
+        )
+        scene.load_state_dict_multi(ckpt['deformation_state_dicts'])
+        scene.refresh_weights(config.K_neighbors)
+        scene.eval()
+        return scene, None, config
+
+    # Single-object path (unchanged)
     gs = GaussianModel()
     gs.load_ply(config.ply_path)
     gs.apply_rotation(
@@ -84,28 +113,44 @@ def load_model(checkpoint_path, device='cuda:0'):
 
 
 @torch.no_grad()
-def render_from_view(gs, deform, config, elevation, azimuth, radius,
+def render_from_view(gs_or_scene, deform, config, elevation, azimuth, radius,
                      width, height, device='cuda:0', camera_follow=False):
-    """Render 4DGS video from a specific viewpoint."""
+    """Render 4DGS video from a specific viewpoint.
+
+    gs_or_scene: GaussianModel (single) or MultiObjectScene (multi-object).
+    deform: Deformation4D (single) or None (multi-object).
+    """
+    from models.multi_object_scene import MultiObjectScene
+    is_multi = isinstance(gs_or_scene, MultiObjectScene)
+
     K = get_intrinsics(config.fovy_deg, width, height)
 
-    activated_opacities = gs.get_activated_opacities()
-    activated_scales = gs.get_activated_scales()
-    sh_coeffs = gs.get_sh_coeffs()
-    sh_degree = int(math.sqrt(sh_coeffs.shape[1])) - 1
-
-    all_means, all_quats = deform.deform_all_frames(gs, use_fine=True)
+    if is_multi:
+        scene = gs_or_scene
+        activated_scales, sh_coeffs, activated_opacities, sh_degree = scene.get_static_properties()
+        all_means, all_quats = scene.deform_all_frames(use_fine=True)
+        center = scene.scene_center().cpu()
+        color_wp = scene.get_global_color_white_point()
+        if config.color_white_point != 1.0:
+            color_wp = config.color_white_point
+    else:
+        gs = gs_or_scene
+        activated_opacities = gs.get_activated_opacities()
+        activated_scales = gs.get_activated_scales()
+        sh_coeffs = gs.get_sh_coeffs()
+        sh_degree = int(math.sqrt(sh_coeffs.shape[1])) - 1
+        all_means, all_quats = deform.deform_all_frames(gs, use_fine=True)
+        center = gs.means.mean(dim=0).cpu()
+        color_wp = getattr(config, 'color_white_point', 1.0)
 
     if camera_follow:
-        # Per-frame viewmat tracking object center
-        frame_centers = all_means.mean(dim=1).cpu()  # [T, 3]
+        frame_centers = all_means.mean(dim=1).cpu()
         viewmat = torch.stack([
             orbit_camera(elevation, azimuth, radius, target=frame_centers[t])
             for t in range(config.num_frames)
-        ]).to(device)  # [T, 4, 4]
+        ]).to(device)
     else:
-        scene_center = gs.means.mean(dim=0).cpu()
-        viewmat = orbit_camera(elevation, azimuth, radius, target=scene_center).to(device)
+        viewmat = orbit_camera(elevation, azimuth, radius, target=center).to(device)
 
     video = render_video(
         all_means, all_quats,
@@ -113,19 +158,18 @@ def render_from_view(gs, deform, config, elevation, azimuth, radius,
         viewmat, K, width, height,
         config.num_frames, sh_degree=sh_degree
     )
-    # Color levels adjustment
-    if getattr(config, 'color_white_point', 1.0) != 1.0:
-        video = (video / config.color_white_point).clamp(0, 1)
+    if color_wp != 1.0:
+        video = (video / color_wp).clamp(0, 1)
     return video
 
 
 @torch.no_grad()
-def mode_single(gs, deform, config, args):
+def mode_single(gs_or_scene, deform, config, args):
     """Render a single viewpoint GIF."""
     follow = getattr(args, 'camera_follow', False) or getattr(config, 'camera_follow', False)
     print(f"Rendering: elevation={args.elevation}, azimuth={args.azimuth}, radius={args.radius}, follow={follow}")
     video = render_from_view(
-        gs, deform, config,
+        gs_or_scene, deform, config,
         args.elevation, args.azimuth, args.radius,
         args.width, args.height, args.device, camera_follow=follow
     )
@@ -135,7 +179,7 @@ def mode_single(gs, deform, config, args):
 
 
 @torch.no_grad()
-def mode_multiview(gs, deform, config, args):
+def mode_multiview(gs_or_scene, deform, config, args):
     """Render from a grid of viewpoints."""
     follow = getattr(args, 'camera_follow', False) or getattr(config, 'camera_follow', False)
     elevations = [float(e) for e in args.elevations.split(',')]
@@ -145,7 +189,7 @@ def mode_multiview(gs, deform, config, args):
         for azi in azimuths:
             print(f"Rendering: ele={ele:.0f}, azi={azi:.0f}, follow={follow}")
             video = render_from_view(
-                gs, deform, config,
+                gs_or_scene, deform, config,
                 ele, azi, args.radius,
                 args.width, args.height, args.device, camera_follow=follow
             )
@@ -156,22 +200,35 @@ def mode_multiview(gs, deform, config, args):
 
 
 @torch.no_grad()
-def mode_orbit(gs, deform, config, args):
+def mode_orbit(gs_or_scene, deform, config, args):
     """Camera orbits 360° while the 4DGS animation plays.
 
     Output: a single video where each output frame = one (time, azimuth) pair.
     The camera sweeps through `num_orbits` full rotations over the animation.
     """
+    from models.multi_object_scene import MultiObjectScene
+    is_multi = isinstance(gs_or_scene, MultiObjectScene)
+
     follow = getattr(args, 'camera_follow', False) or getattr(config, 'camera_follow', False)
-    scene_center = gs.means.mean(dim=0).cpu()
     K = get_intrinsics(config.fovy_deg, args.width, args.height)
 
-    activated_opacities = gs.get_activated_opacities()
-    activated_scales = gs.get_activated_scales()
-    sh_coeffs = gs.get_sh_coeffs()
-    sh_degree = int(math.sqrt(sh_coeffs.shape[1])) - 1
-
-    all_means, all_quats = deform.deform_all_frames(gs, use_fine=True)
+    if is_multi:
+        scene = gs_or_scene
+        scene_center = scene.scene_center().cpu()
+        activated_scales, sh_coeffs, activated_opacities, sh_degree = scene.get_static_properties()
+        all_means, all_quats = scene.deform_all_frames(use_fine=True)
+        color_wp = scene.get_global_color_white_point()
+        if config.color_white_point != 1.0:
+            color_wp = config.color_white_point
+    else:
+        gs = gs_or_scene
+        scene_center = gs.means.mean(dim=0).cpu()
+        activated_opacities = gs.get_activated_opacities()
+        activated_scales = gs.get_activated_scales()
+        sh_coeffs = gs.get_sh_coeffs()
+        sh_degree = int(math.sqrt(sh_coeffs.shape[1])) - 1
+        all_means, all_quats = deform.deform_all_frames(gs, use_fine=True)
+        color_wp = getattr(config, 'color_white_point', 1.0)
 
     # Pre-compute per-frame centers for camera follow
     if follow:
@@ -200,8 +257,8 @@ def mode_orbit(gs, deform, config, args):
             viewmat, K, args.width, args.height, sh_degree=sh_degree
         )
         # Color levels adjustment
-        if getattr(config, 'color_white_point', 1.0) != 1.0:
-            img = (img / config.color_white_point).clamp(0, 1)
+        if color_wp != 1.0:
+            img = (img / color_wp).clamp(0, 1)
         frame_np = (img.cpu().clamp(0, 1).numpy() * 255).astype(np.uint8)
         orbit_frames_list.append(frame_np)
 
@@ -215,7 +272,7 @@ def mode_orbit(gs, deform, config, args):
     # Also save individual time-step GIFs from a few fixed views
     for azi in [0, 90, 180, 270]:
         video = render_from_view(
-            gs, deform, config,
+            gs_or_scene, deform, config,
             args.elevation, azi, args.radius,
             args.width, args.height, args.device, camera_follow=follow
         )
@@ -265,15 +322,23 @@ if __name__ == '__main__':
     os.makedirs(args.output, exist_ok=True)
 
     print(f"Loading checkpoint: {args.checkpoint}")
-    gs, deform, config = load_model(args.checkpoint, args.device)
-    print(f"Loaded: {gs.num_gaussians} gaussians, {config.num_frames} frames")
+    gs_or_scene, deform, config = load_model(args.checkpoint, args.device)
+
+    from models.multi_object_scene import MultiObjectScene
+    is_multi = isinstance(gs_or_scene, MultiObjectScene)
+    if is_multi:
+        print(f"Loaded multi-object scene: {gs_or_scene.total_gaussians} total gaussians, "
+              f"{gs_or_scene.num_objects} objects, {config.num_frames} frames")
+    else:
+        print(f"Loaded: {gs_or_scene.num_gaussians} gaussians, {config.num_frames} frames")
+
     # Use checkpoint's radius if not explicitly set
     if args.radius == 3.0 and hasattr(config, 'camera_radius'):
         args.radius = config.camera_radius
 
     if args.mode == 'single':
-        mode_single(gs, deform, config, args)
+        mode_single(gs_or_scene, deform, config, args)
     elif args.mode == 'multiview':
-        mode_multiview(gs, deform, config, args)
+        mode_multiview(gs_or_scene, deform, config, args)
     elif args.mode == 'orbit':
-        mode_orbit(gs, deform, config, args)
+        mode_orbit(gs_or_scene, deform, config, args)

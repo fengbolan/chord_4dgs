@@ -1,4 +1,6 @@
 #!/bin/bash
+cd "$(dirname "$0")/.."
+
 CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py \
   --scene cat \
   --sds_model_name Wan-AI/Wan2.2-T2V-A14B-Diffusers \
@@ -13,7 +15,11 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python train.py \
   --num_fine_cp 500 \
   --temp_weight_start 19.2 \
   --temp_weight_end 1.6 \
+  --accel_weight_start 0.5 \
+  --accel_weight_end 0.5 \
   --spatial_weight_start 6000.0 \
   --spatial_weight_end 300.0 \
-  --scene_name cat_41f_strong_reg \
+  --displacement_weight_start 200.0 \
+  --displacement_weight_end 20.0 \
+  --scene_name cat_41f_accel_disp \
   --device cuda:0
